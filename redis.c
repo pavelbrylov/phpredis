@@ -29,6 +29,7 @@
 #include <zend_exceptions.h>
 
 #include "ext/session/php_session.h"
+#include "igbinary/igbinary.h"
 
 #include "library.h"
 
@@ -70,6 +71,10 @@ static zend_function_entry redis_functions[] = {
      PHP_ME(Redis, ping, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, get, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, set, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, setFast, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, initCounter, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, incFast, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, getFast, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, setex, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, setnx, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getSet, NULL, ZEND_ACC_PUBLIC)
@@ -543,6 +548,235 @@ PHP_METHOD(Redis, set)
 	}
 	REDIS_PROCESS_RESPONSE(redis_boolean_response);
 }
+
+/* {{{ proto boolean Redis::initCounter(string key)
+ */
+PHP_METHOD(Redis, initCounter)
+{
+    zval *object = getThis();
+    RedisSock *redis_sock;
+    char *key, *cmd;
+    int key_len, cmd_len;
+    char buf[1024];
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &key, &key_len) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    REDIS_FROM_OBJECT(redis_sock, object);
+
+    cmd_len = redis_cmd_format_static(&cmd, "SETNX", "sd", key, key_len, 0);
+
+    SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
+
+	efree(cmd);
+
+    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
+    	RETURN_FALSE;
+    }
+
+    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
+    	redis_stream_close(redis_sock TSRMLS_CC);
+        redis_sock->stream = NULL;
+        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
+        redis_sock->mode = ATOMIC;
+        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
+        RETURN_FALSE;
+    }
+
+    RETURN_BOOL((buf[0] == ':' && buf[1] == '1'));
+}
+/* }}} */
+
+/* {{{ proto boolean Redis::setFast(string key, mixed value, long expire)
+ */
+PHP_METHOD(Redis, setFast)
+{
+    zval *object = getThis();
+    RedisSock *redis_sock;
+    char *key, *cmd;
+    int key_len, cmd_len;
+    long expire;
+    zval *z_value;
+    char buf[1024];
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "szl", &key, &key_len, &z_value, &expire) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    REDIS_FROM_OBJECT(redis_sock, object);
+
+    switch (Z_TYPE_P(z_value)) {
+    	case IS_STRING:
+    		if (Z_STRLEN_P(z_value) > 4 && memcmp(Z_STRVAL_P(z_value), "\0\0\0\2", sizeof("\0\0\0\2") - 1)) {
+	    		cmd_len = redis_cmd_format_static(&cmd, "SETEX", "sds", key, key_len, expire, Z_STRVAL_P(z_value), Z_STRLEN_P(z_value));
+    			break;
+			} /* else fall through */
+			
+		case IS_ARRAY:
+		case IS_OBJECT: {
+			size_t len;
+			char *buf;	
+			if (igbinary_serialize((uint8_t **)&buf, &len, z_value TSRMLS_CC)) { /* ok */
+				RETURN_FALSE;
+			}
+			cmd_len = redis_cmd_format_static(&cmd, "SETEX", "sds", key, key_len, expire, buf, len);
+			efree(buf);
+		}
+			break;
+
+		case IS_LONG:
+		case IS_BOOL:
+			cmd_len = redis_cmd_format_static(&cmd, "SETEX", "sdd", key, key_len, expire, Z_LVAL_P(z_value));
+			break;
+
+		case IS_DOUBLE:
+			cmd_len = redis_cmd_format_static(&cmd, "SETEX", "sdf", key, key_len, expire, Z_DVAL_P(z_value));
+			break;
+
+		default:
+			RETURN_FALSE;
+    }
+
+    SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
+
+	efree(cmd);
+
+    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
+    	RETURN_FALSE;
+    }
+
+    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
+    	redis_stream_close(redis_sock TSRMLS_CC);
+        redis_sock->stream = NULL;
+        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
+        redis_sock->mode = ATOMIC;
+        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
+        RETURN_FALSE;
+    }
+
+    RETURN_BOOL((buf[0] == '+'));
+}
+/* }}} */
+
+/* {{{ proto boolean Redis::incFast(string key)
+ */
+PHP_METHOD(Redis, incFast)
+{
+    zval *object = getThis();
+    RedisSock *redis_sock;
+    char *key, *cmd;
+    int key_len, cmd_len;
+    char buf[1024];
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &key, &key_len) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    REDIS_FROM_OBJECT(redis_sock, object)
+
+    cmd_len = redis_cmd_format_static(&cmd, "INCR", "s", key, key_len);
+
+    SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
+
+	efree(cmd);
+
+    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
+    	RETURN_FALSE;
+    }
+
+    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
+    	redis_stream_close(redis_sock TSRMLS_CC);
+        redis_sock->stream = NULL;
+        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
+        redis_sock->mode = ATOMIC;
+        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
+        RETURN_FALSE;
+    }
+
+    if (buf[0] == ':') {
+    	long long ret = atoll(buf + 1);
+		if (ret > (long long)LONG_MAX) {
+			RETURN_DOUBLE((double)ret);
+    	} else {
+    		RETURN_LONG((long)ret);
+    	}
+    } else {
+		RETURN_FALSE;
+    }
+}
+/* }}} */
+
+/* {{{ proto string Redis::getFast(string key)
+ */
+PHP_METHOD(Redis, getFast)
+{
+    zval *object = getThis();
+    RedisSock *redis_sock;
+    char *key, *cmd;
+    int key_len, cmd_len;
+    char buf[1024];
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &key, &key_len) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    REDIS_FROM_OBJECT(redis_sock, object)
+
+    cmd_len = redis_cmd_format_static(&cmd, "GET", "s", key, key_len);
+
+    SOCKET_WRITE_COMMAND(redis_sock, cmd, cmd_len)
+
+	efree(cmd);
+
+    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
+    	RETURN_FALSE;
+    }
+
+    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
+    	redis_stream_close(redis_sock TSRMLS_CC);
+        redis_sock->stream = NULL;
+        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
+        redis_sock->mode = ATOMIC;
+        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
+        RETURN_FALSE;
+    }
+
+    if (buf[0] == '$') {
+    	char *tmp, *ptr;
+    	int tmp_len = atoi(buf + 1);
+    	int len = 0;
+
+    	if (tmp_len < 0) {
+    		RETURN_FALSE;
+    	}
+
+    	tmp = emalloc(tmp_len + 1);
+    	ptr = tmp;
+    	while ((len < tmp_len) && !php_stream_eof(redis_sock->stream)) {
+    		int ret = php_stream_read(redis_sock->stream, ptr, tmp_len - len);
+    		len += ret;
+    		ptr += ret;
+		}
+    	*ptr = '\0';
+
+    	/* read trailing \r\n */
+    	php_stream_gets(redis_sock->stream, buf, sizeof(buf));
+
+    	/* igbinary serialized data */
+    	if (tmp_len > 4 && !memcmp(tmp, "\0\0\0\2", sizeof("\0\0\0\2") - 1)) {
+    		if (igbinary_unserialize((const uint8_t *)tmp, (size_t)tmp_len, &return_value TSRMLS_CC)) {
+    			RETVAL_FALSE;
+			}
+			efree(tmp);
+			return;
+    	} else {
+    		RETURN_STRINGL(tmp, tmp_len, 0);
+		}
+    }
+    RETURN_FALSE;
+}
+/* }}} */
 
 /* {{{ proto boolean Redis::setex(string key, long expire, string value)
  */
