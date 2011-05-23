@@ -34,6 +34,7 @@ PHP_METHOD(Redis, setFast);
 PHP_METHOD(Redis, initCounter);
 PHP_METHOD(Redis, incFast);
 PHP_METHOD(Redis, getFast);
+PHP_METHOD(Redis, incMulti);
 PHP_METHOD(Redis, setex);
 PHP_METHOD(Redis, setnx);
 PHP_METHOD(Redis, getSet);

@@ -29,6 +29,7 @@
 #include <zend_exceptions.h>
 
 #include "ext/session/php_session.h"
+#include "ext/standard/php_smart_str.h"
 #include "igbinary/igbinary.h"
 
 #include "library.h"
@@ -75,6 +76,7 @@ static zend_function_entry redis_functions[] = {
      PHP_ME(Redis, initCounter, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, incFast, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getFast, NULL, ZEND_ACC_PUBLIC)
+     PHP_ME(Redis, incMulti, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, setex, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, setnx, NULL, ZEND_ACC_PUBLIC)
      PHP_ME(Redis, getSet, NULL, ZEND_ACC_PUBLIC)
@@ -549,6 +551,19 @@ PHP_METHOD(Redis, set)
 	REDIS_PROCESS_RESPONSE(redis_boolean_response);
 }
 
+#define PHP_REDIS_READ_BUF	\
+	if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {	\
+    	RETURN_FALSE;	\
+    }	\
+    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {	\
+    	redis_stream_close(redis_sock TSRMLS_CC);	\
+        redis_sock->stream = NULL;	\
+        redis_sock->status = REDIS_SOCK_STATUS_FAILED;	\
+        redis_sock->mode = ATOMIC;	\
+        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);	\
+        RETURN_FALSE;	\
+    }
+
 /* {{{ proto boolean Redis::initCounter(string key)
  */
 PHP_METHOD(Redis, initCounter)
@@ -571,18 +586,7 @@ PHP_METHOD(Redis, initCounter)
 
 	efree(cmd);
 
-    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
-    	RETURN_FALSE;
-    }
-
-    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
-    	redis_stream_close(redis_sock TSRMLS_CC);
-        redis_sock->stream = NULL;
-        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
-        redis_sock->mode = ATOMIC;
-        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
-        RETURN_FALSE;
-    }
+	PHP_REDIS_READ_BUF
 
     RETURN_BOOL((buf[0] == ':' && buf[1] == '1'));
 }
@@ -642,18 +646,7 @@ PHP_METHOD(Redis, setFast)
 
 	efree(cmd);
 
-    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
-    	RETURN_FALSE;
-    }
-
-    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
-    	redis_stream_close(redis_sock TSRMLS_CC);
-        redis_sock->stream = NULL;
-        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
-        redis_sock->mode = ATOMIC;
-        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
-        RETURN_FALSE;
-    }
+	PHP_REDIS_READ_BUF
 
     RETURN_BOOL((buf[0] == '+'));
 }
@@ -681,18 +674,7 @@ PHP_METHOD(Redis, incFast)
 
 	efree(cmd);
 
-    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
-    	RETURN_FALSE;
-    }
-
-    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
-    	redis_stream_close(redis_sock TSRMLS_CC);
-        redis_sock->stream = NULL;
-        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
-        redis_sock->mode = ATOMIC;
-        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
-        RETURN_FALSE;
-    }
+	PHP_REDIS_READ_BUF
 
     if (buf[0] == ':') {
     	long long ret = atoll(buf + 1);
@@ -704,6 +686,69 @@ PHP_METHOD(Redis, incFast)
     } else {
 		RETURN_FALSE;
     }
+}
+/* }}} */
+
+/* {{{ proto boolean Redis::incMulti(array keys)
+ */
+PHP_METHOD(Redis, incMulti)
+{
+    zval *object = getThis();
+    zval *keys;
+    RedisSock *redis_sock;
+    char buf[1024];
+    HashPosition pointer;
+    zval **data;
+    smart_str pipeline = {0};
+    int nkeys;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "a", &keys) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    REDIS_FROM_OBJECT(redis_sock, object)
+
+    if (!(nkeys = zend_hash_num_elements(Z_ARRVAL_P(keys)))) {
+    	RETURN_FALSE;
+    }
+
+	for (zend_hash_internal_pointer_reset_ex(Z_ARRVAL_P(keys), &pointer);
+		zend_hash_get_current_data_ex(Z_ARRVAL_P(keys), (void**) &data, &pointer) == SUCCESS;
+		zend_hash_move_forward_ex(Z_ARRVAL_P(keys), &pointer)) {
+
+		if (Z_TYPE_PP(data) != IS_STRING) {
+			php_error_docref(NULL TSRMLS_CC, E_WARNING, "The increment keys must be strings");
+			smart_str_free(&pipeline);
+			RETURN_FALSE;
+		}
+
+		smart_str_appendc(&pipeline, '*');
+		smart_str_append_long(&pipeline, 2);
+		smart_str_appendl(&pipeline, _NL, sizeof(_NL) - 1);
+		smart_str_appendc(&pipeline, '$');
+		smart_str_append_long(&pipeline, sizeof("INCR") - 1);
+		smart_str_appendl(&pipeline, _NL, sizeof(_NL) - 1);
+		smart_str_appendl(&pipeline, "INCR", sizeof("INCR") - 1);
+		smart_str_appendl(&pipeline, _NL, sizeof(_NL) - 1);
+		smart_str_appendc(&pipeline, '$');
+		smart_str_append_long(&pipeline, Z_STRLEN_PP(data));
+		smart_str_appendl(&pipeline, _NL, sizeof(_NL) - 1);
+		smart_str_appendl(&pipeline, Z_STRVAL_PP(data), Z_STRLEN_PP(data));
+		smart_str_appendl(&pipeline, _NL, sizeof(_NL) - 1);
+	}
+	smart_str_0(&pipeline);
+
+	SOCKET_WRITE_COMMAND(redis_sock, pipeline.c, pipeline.len)
+	smart_str_free(&pipeline);
+	array_init(return_value);
+	while (nkeys-- > 0) {
+  		PHP_REDIS_READ_BUF
+  		if (buf[0] == ':') {
+    		add_next_index_long(return_value, atol(buf + 1));
+    	} else {
+	    	add_next_index_bool(return_value, 0);
+    	}
+	}
 }
 /* }}} */
 
@@ -729,18 +774,7 @@ PHP_METHOD(Redis, getFast)
 
 	efree(cmd);
 
-    if (-1 == redis_check_eof(redis_sock TSRMLS_CC)) {
-    	RETURN_FALSE;
-    }
-
-    if (php_stream_gets(redis_sock->stream, buf, sizeof(buf)) == NULL) {
-    	redis_stream_close(redis_sock TSRMLS_CC);
-        redis_sock->stream = NULL;
-        redis_sock->status = REDIS_SOCK_STATUS_FAILED;
-        redis_sock->mode = ATOMIC;
-        zend_throw_exception(redis_exception_ce, "read error on connection", 0 TSRMLS_CC);
-        RETURN_FALSE;
-    }
+	PHP_REDIS_READ_BUF
 
     if (buf[0] == '$') {
     	char *tmp, *ptr;
