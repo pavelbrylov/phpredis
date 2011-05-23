@@ -6,7 +6,7 @@
 #include <ext/standard/php_smart_str.h>
 #include <ext/standard/php_var.h>
 
-#include "igbinary/igbinary.h"
+#include "ext/igbinary/igbinary.h"
 #include <zend_exceptions.h>
 #include "php_redis.h"
 #include "library.h"

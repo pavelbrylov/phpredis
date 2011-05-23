@@ -30,7 +30,7 @@
 
 #include "ext/session/php_session.h"
 #include "ext/standard/php_smart_str.h"
-#include "igbinary/igbinary.h"
+#include "ext/igbinary/igbinary.h"
 
 #include "library.h"
 
