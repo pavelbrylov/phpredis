@@ -3902,36 +3902,19 @@ PHP_METHOD(Redis, multi)
 }
 
 /* Fast execution without waiting for answer by Oksana Tkanko */
-
 PHP_METHOD(Redis, flashExec)
 {
-     RedisSock *redis_sock;
-     zval *object;
-     int response_len, cmd_len;
-     char *value;
-     char *response;
-     char *cmd;
+	RedisSock *redis_sock;
+	zval *object;
+	if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(), "0", &object, redis_ce) == FAILURE) {
+		RETURN_FALSE;
+	}
 
-     if (zend_parse_method_parameters(ZEND_NUM_ARGS() TSRMLS_CC, getThis(), "O",
-                                     &object, redis_ce) == FAILURE) {
-        RETURN_FALSE;
-     }
+	if (redis_sock_get(object, &redis_sock TSRMLS_CC) < 0) {
+		RETURN_FALSE;
+	}
 
-     REDIS_FROM_OBJECT(redis_sock, object)
-
-     if (!redis_sock) {
-        RETURN_FALSE;
-     }
-
-     redis_sock->mode = ATOMIC;
-     cmd_len = redis_cmd_format_static(&cmd, "EXEC", "");
-
-     if (redis_sock_write(redis_sock, cmd, cmd_len TSRMLS_CC) < 0) {
-        	efree(cmd);
-	        RETURN_FALSE;
-     }
-     efree(cmd);
-     RETURN_ZVAL(getThis(), 1, 0);
+	RETURN_ZVAL(object, 1, 0);
 }
 
 /* discard */
